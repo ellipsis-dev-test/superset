@@ -75,7 +75,7 @@ async def list_rls_filters(
     try:
         from superset.daos.security import RLSDAO
 
-        def _serialize(obj: object, cols: list[str] | None) -> RlsFilterInfo | None:
+        def _serialize(obj: object, cols: list[str]) -> RlsFilterInfo | None:
             return serialize_rls_filter_object(obj)
 
         list_tool = ModelListCore(
