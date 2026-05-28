@@ -24,6 +24,7 @@ from sqlglot import Dialects, exp, parse_one
 from superset.exceptions import QueryClauseValidationException, SupersetParseError
 from superset.jinja_context import JinjaTemplateProcessor
 from superset.sql.parse import (
+    BaseSQLStatement,
     CTASMethod,
     extract_tables_from_statement,
     JinjaSQLResult,
@@ -1105,7 +1106,15 @@ def test_split_kql(kql: str, expected: list[str]) -> None:
         ("postgresql", "DROP TABLE foo", True),
         ("postgresql", "EXPLAIN ANALYZE SELECT * FROM foo", False),
         ("postgresql", "EXPLAIN ANALYZE DELETE FROM foo", True),
-        ("postgresql", "SHOW search_path", False),
+        # SHOW reads server configuration (version, hba_file, ssl,
+        # search_path, etc.). It is information-disclosure equivalent to
+        # the read-side entries already in DISALLOWED_SQL_FUNCTIONS
+        # (pg_read_file, version, current_setting) and is gated alongside
+        # the writers so it is rejected when allow_dml=False.
+        ("postgresql", "SHOW search_path", True),
+        # SET search_path parses as exp.Set (a structured node), not
+        # exp.Command, so the SET-in-mutating-commands rule does NOT
+        # catch it. Pure GUC reads/writes stay non-mutating.
         ("postgresql", "SET search_path TO public", False),
         (
             "postgres",
@@ -1370,6 +1379,128 @@ def test_is_mutating_anonymous_block(sql: str, expected: bool) -> None:
     Since we can't parse the PL/pgSQL inside the block we always assume it is mutating.
     """
     assert SQLStatement(sql, "postgresql").is_mutating() == expected
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        # PostgreSQL large-object writers: each mutates server state. The bare
+        # SELECT wrapper is irrelevant because the function call itself is the
+        # side effect.
+        ("SELECT lo_from_bytea(0, decode('deadbeef', 'hex'))", True),
+        ("SELECT lo_export(12345, '/tmp/payload.bin')", True),
+        ("SELECT lo_import('/etc/passwd')", True),
+        ("SELECT lo_put(12345, 0, decode('00', 'hex'))", True),
+        ("SELECT lo_create(0)", True),
+        ("SELECT lowrite(12345, decode('00', 'hex'))", True),
+        # PostgreSQL sequence mutator. setval() looks like a read but
+        # advances sequence state for every subsequent nextval caller.
+        ("SELECT setval('public.my_seq', 1000)", True),
+        ("SELECT SETVAL('public.my_seq', 1)", True),
+        # Read-side large-object functions are intentionally NOT classified
+        # as mutating here. They are still blocked via the function denylist
+        # (see DISALLOWED_SQL_FUNCTIONS) but they do not write state.
+        ("SELECT lo_get(12345)", False),
+        ("SELECT loread(12345, 1024)", False),
+        # Case-insensitive matching: the AST stores the raw casing for
+        # anonymous functions, the check uppercases both sides.
+        ("SELECT LO_EXPORT(12345, '/tmp/x')", True),
+        # `SELECT INTO new_table FROM existing` creates a new relation; treat
+        # as mutating even though sqlglot parses it as exp.Select.
+        ("SELECT * INTO new_table FROM existing_table", True),
+        ("SELECT col INTO TEMP new_table FROM existing_table", True),
+        # Plain SELECT must remain non-mutating.
+        ("SELECT 1", False),
+        ("SELECT * FROM users WHERE id = 1", False),
+    ],
+)
+def test_is_mutating_postgres_function_and_select_into(
+    sql: str, expected: bool
+) -> None:
+    """
+    `is_mutating` must catch mutating function calls (PostgreSQL large-object
+    writers) and `SELECT ... INTO new_table` even though the wrapping AST
+    node is a plain `exp.Select`.
+    """
+    assert SQLStatement(sql, "postgresql").is_mutating() == expected
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        # PostgreSQL constructs that sqlglot parses as opaque exp.Command.
+        # Each can wrap a DML body or change effective server state.
+        ("PREPARE u AS UPDATE t SET x = 1", True),
+        ("PREPARE i AS INSERT INTO t VALUES (1)", True),
+        ("EXECUTE my_plan", True),
+        ("CALL my_writing_procedure()", True),
+        ("COPY t FROM '/tmp/data.csv'", True),
+        ("GRANT SELECT ON t TO public", True),
+        ("REVOKE SELECT ON t FROM public", True),
+        ("SET ROLE other_role", True),
+        ("REFRESH MATERIALIZED VIEW mv", True),
+        ("REINDEX TABLE t", True),
+        ("VACUUM t", True),
+        # SHOW commands disclose server configuration (version, hba_file,
+        # ssl, search_path, etc.). They are read-only but treated as gated
+        # so they are blocked by the same allow_dml=False gate that blocks
+        # the writers; this mirrors the existing read-side blocks in
+        # DISALLOWED_SQL_FUNCTIONS for pg_read_file, version(), etc.
+        ("SHOW search_path", True),
+        ("SHOW all", True),
+        ("SHOW server_version", True),
+        # Pre-existing positive controls
+        ("DO $$ BEGIN UPDATE t SET x = 1; END $$", True),
+        ("EXPLAIN ANALYZE UPDATE t SET x = 1", True),
+    ],
+)
+def test_is_mutating_postgres_command_constructs(sql: str, expected: bool) -> None:
+    """
+    Several PostgreSQL constructs are represented by sqlglot as opaque
+    `exp.Command` nodes (no structured AST). `is_mutating` recognises them
+    by command name so they cannot slip past the read-only gate.
+    """
+    assert SQLStatement(sql, "postgresql").is_mutating() == expected
+
+
+@pytest.mark.parametrize(
+    "sql, engine, functions, expected",
+    [
+        # MySQL `@@<name>` syntax parses as exp.SessionParameter, which is
+        # not a subclass of exp.Func. The walker must include it so the
+        # denylist entry for `version` still catches `SELECT @@version`.
+        ("SELECT @@version", "mysql", {"version"}, True),
+        ("SELECT @@global.version", "mysql", {"version"}, True),
+        ("SELECT @@hostname", "mysql", {"hostname"}, True),
+        ("SELECT @@datadir", "mysql", {"datadir"}, True),
+        # Negative control: a session parameter not in the denylist must
+        # not match.
+        ("SELECT @@autocommit", "mysql", {"version", "hostname"}, False),
+        # A plain SELECT does not introduce session-parameter names.
+        ("SELECT 1", "mysql", {"version"}, False),
+        # The pre-existing exp.Func walk still works for normal calls.
+        ("SELECT version()", "mysql", {"version"}, True),
+        # PostgreSQL large-object functions are exp.Anonymous calls. The
+        # walk includes them; the denylist entry catches them.
+        ("SELECT lo_export(12345, '/tmp/x')", "postgresql", {"lo_export"}, True),
+        (
+            "SELECT lo_from_bytea(0, decode('00','hex'))",
+            "postgresql",
+            {"lo_from_bytea"},
+            True,
+        ),
+        ("SELECT loread(12345, 1024)", "postgresql", {"loread"}, True),
+    ],
+)
+def test_check_functions_present_session_parameter(
+    sql: str, engine: str, functions: set[str], expected: bool
+) -> None:
+    """
+    `check_functions_present` must visit `exp.SessionParameter` so that
+    denylist entries for names like `version` or `hostname` also match
+    `SELECT @@version` / `SELECT @@hostname` in MySQL.
+    """
+    assert SQLScript(sql, engine).check_functions_present(functions) == expected
 
 
 @pytest.mark.parametrize(
@@ -3134,6 +3265,147 @@ def test_check_tables_present(sql: str, engine: str, expected: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    "engine, sql, denylist, expected",
+    [
+        # Postgres: schema-qualified denylist entry matches schema-qualified
+        # reference.
+        (
+            "postgresql",
+            "SELECT * FROM information_schema.tables",
+            {"information_schema.tables"},
+            True,
+        ),
+        # ... and is case-insensitive.
+        (
+            "postgresql",
+            "SELECT * FROM INFORMATION_SCHEMA.TABLES",
+            {"information_schema.tables"},
+            True,
+        ),
+        # Schema-qualified denylist entry does NOT match a bare-name table
+        # of the same name in another schema. A user table named `tables`
+        # remains queryable.
+        (
+            "postgresql",
+            "SELECT * FROM public.tables",
+            {"information_schema.tables"},
+            False,
+        ),
+        (
+            "postgresql",
+            "SELECT * FROM tables",
+            {"information_schema.tables"},
+            False,
+        ),
+        # Bare-name denylist entry still matches by table name only
+        # (existing behavior, schema-agnostic).
+        (
+            "postgresql",
+            "SELECT * FROM pg_stat_activity",
+            {"pg_stat_activity"},
+            True,
+        ),
+        (
+            "postgresql",
+            "SELECT * FROM pg_catalog.pg_stat_activity",
+            {"pg_stat_activity"},
+            True,
+        ),
+        # Mixed entries: one schema-qualified, one bare. Match either.
+        (
+            "postgresql",
+            "SELECT * FROM information_schema.columns",
+            {"information_schema.tables", "information_schema.columns"},
+            True,
+        ),
+        (
+            "postgresql",
+            "SELECT * FROM pg_roles",
+            {"information_schema.tables", "pg_roles"},
+            True,
+        ),
+        # Negative control.
+        (
+            "postgresql",
+            "SELECT * FROM my_table",
+            {"information_schema.tables", "pg_roles"},
+            False,
+        ),
+        # MySQL: the shipped DISALLOWED_SQL_TABLES['mysql'] entries are all
+        # schema-qualified (`mysql.user`, `performance_schema.threads`,
+        # `performance_schema.processlist`). Without schema-aware matching
+        # the entries are dead config. These cases pin the fix.
+        (
+            "mysql",
+            "SELECT user, host, authentication_string FROM mysql.user",
+            {"mysql.user"},
+            True,
+        ),
+        (
+            "mysql",
+            "SELECT * FROM performance_schema.threads",
+            {"performance_schema.threads"},
+            True,
+        ),
+        (
+            "mysql",
+            "SELECT * FROM performance_schema.processlist",
+            {"performance_schema.processlist"},
+            True,
+        ),
+        # MySQL must NOT block a user-authored table that shares the leaf
+        # name with the system view.
+        (
+            "mysql",
+            "SELECT * FROM mydb.user",
+            {"mysql.user"},
+            False,
+        ),
+        # MSSQL: same shape, `sys.*` entries are schema-qualified.
+        (
+            "mssql",
+            "SELECT name, password_hash FROM sys.sql_logins",
+            {"sys.sql_logins"},
+            True,
+        ),
+        (
+            "mssql",
+            "SELECT name, sid FROM sys.server_principals",
+            {"sys.server_principals"},
+            True,
+        ),
+        (
+            "mssql",
+            "SELECT * FROM sys.configurations",
+            {"sys.configurations"},
+            True,
+        ),
+        # MSSQL must NOT block a user-authored table sharing the leaf name.
+        (
+            "mssql",
+            "SELECT * FROM mydb.sql_logins",
+            {"sys.sql_logins"},
+            False,
+        ),
+    ],
+)
+def test_check_tables_present_schema_qualified(
+    engine: str, sql: str, denylist: set[str], expected: bool
+) -> None:
+    """
+    `check_tables_present` must distinguish schema-qualified denylist
+    entries (e.g. `information_schema.tables`, `mysql.user`,
+    `sys.sql_logins`) from bare-name entries (e.g. `pg_stat_activity`).
+    Schema-qualified entries only match schema-qualified references in
+    the SQL; bare entries match the table name regardless of schema.
+
+    Covers Postgres, MySQL, and MSSQL dialects so the shipped
+    DISALLOWED_SQL_TABLES entries for each remain effective.
+    """
+    assert SQLScript(sql, engine).check_tables_present(denylist) == expected
+
+
+@pytest.mark.parametrize(
     "kql, expected",
     [
         (
@@ -3311,3 +3583,14 @@ def test_backtick_invalid_sql_still_fails() -> None:
     sql = "SELECT * FROM `table` WHERE"
     with pytest.raises(SupersetParseError):
         SQLScript(sql, "base")
+
+
+def test_base_sql_statement_is_destructive_raises_not_implemented() -> None:
+    """
+    BaseSQLStatement.is_destructive is abstract; both concrete subclasses
+    (SQLStatement and KustoKQLStatement) override it, so calling the base
+    implementation directly must raise. This exercises the abstract stub
+    so it stays exercised under coverage.
+    """
+    with pytest.raises(NotImplementedError):
+        BaseSQLStatement.is_destructive(object())  # type: ignore[arg-type]
