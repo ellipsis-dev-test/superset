@@ -48,6 +48,15 @@ const StyledCard = styled(Card)`
         transform: translateY(0);
       }
     }
+
+    /* Truncate long descriptions (e.g. localized "Modified at" timestamps)
+       so they don't overflow the card. The full value remains accessible
+       via the tooltip wrapper applied around the description. */
+    .ant-card-meta-description {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   `}
 `;
 
@@ -258,7 +267,15 @@ function ListViewCard({
               </div>
             </TitleContainer>
           }
-          description={description}
+          description={
+            description ? (
+              <Tooltip title={description}>
+                <span>{description}</span>
+              </Tooltip>
+            ) : (
+              description
+            )
+          }
           avatar={avatar || null}
         />
       )}
