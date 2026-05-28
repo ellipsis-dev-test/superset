@@ -757,6 +757,7 @@ class ModelGetSchemaCore(BaseCore, Generic[S]):
         default_sort: str = "changed_on",
         default_sort_direction: Literal["asc", "desc"] = "desc",
         exclude_filter_columns: set[str] | None = None,
+        include_filter_columns: frozenset[str] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         """
@@ -774,6 +775,10 @@ class ModelGetSchemaCore(BaseCore, Generic[S]):
             default_sort_direction: Default sort direction
             exclude_filter_columns: Column names to omit from filter discovery
                 (e.g., sensitive fields like passwords or connection URIs)
+            include_filter_columns: When set, only these column names are advertised
+                as filterable. Applied after exclude_filter_columns. Use this when
+                the list tool's filter schema accepts fewer columns than the DAO
+                exposes (e.g., ReportFilter vs. the full ReportSchedule ORM model).
             logger: Optional logger instance
         """
         super().__init__(logger)
@@ -794,6 +799,7 @@ class ModelGetSchemaCore(BaseCore, Generic[S]):
         # Hide user-directory columns from filter discovery, except the small
         # set callers may legitimately filter by ID (resolved via find_users).
         self.exclude_filter_columns.update(USER_DIRECTORY_FIELDS - USER_FILTER_FIELDS)
+        self.include_filter_columns = include_filter_columns
 
     def _get_filter_columns(self) -> Dict[str, List[str]]:
         """Get filterable columns and operators from the DAO."""
@@ -821,6 +827,11 @@ class ModelGetSchemaCore(BaseCore, Generic[S]):
                     k: v
                     for k, v in result.items()
                     if k not in self.exclude_filter_columns
+                }
+            # Apply allowlist: keep only explicitly permitted filter columns
+            if self.include_filter_columns is not None:
+                result = {
+                    k: v for k, v in result.items() if k in self.include_filter_columns
                 }
             return result
         except Exception as e:
