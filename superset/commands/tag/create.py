@@ -60,8 +60,34 @@ class CreateCustomTagCommand(CreateMixin, BaseCommand):
             exceptions.append(
                 TagCreateFailedError(f"invalid object type {self._object_type}")
             )
+
+        # Validate user has access to the target object
+        if object_type:
+            self._validate_object_access(object_type, self._object_id, exceptions)
+
         if exceptions:
             raise TagInvalidError(exceptions=exceptions)
+
+    def _validate_object_access(
+        self, object_type: ObjectType, object_id: int, exceptions: list[Any]
+    ) -> None:
+        """Validate that the current user has access to the target object."""
+        try:
+            target_object = to_object_model(object_type, object_id)
+            if target_object is None:
+                exceptions.append(
+                    TagCreateFailedError(f"Access denied for {object_type} {object_id}")
+                )
+                return
+            if hasattr(target_object, "raise_for_access"):
+                target_object.raise_for_access()
+        except SupersetSecurityException:
+            exceptions.append(
+                TagCreateFailedError(f"Access denied for {object_type} {object_id}")
+            )
+        except AttributeError:
+            # No request context (e.g. background task) — skip access check
+            pass
 
 
 class CreateCustomTagWithRelationshipsCommand(CreateMixin, BaseCommand):
