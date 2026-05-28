@@ -51,8 +51,8 @@ async def get_rls_filter_info(
 ) -> RlsFilterInfo | RlsFilterError:
     """Get row level security filter details by ID. Requires admin access.
 
-    Returns full RLS filter configuration including name, type, tables, roles,
-    and clause.
+    Returns full RLS filter configuration including name, description, type,
+    tables, roles, clause, created_on, and changed_on.
 
     Example usage:
     ```json

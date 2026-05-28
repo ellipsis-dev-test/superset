@@ -31,7 +31,7 @@ from superset.mcp_service.rls.schemas import (
     ALL_RLS_COLUMNS,
     DEFAULT_RLS_COLUMNS,
     ListRlsFiltersRequest,
-    RlsColumnFilter,
+    RlsFilter,
     RlsFilterError,
     RlsFilterInfo,
     RlsFilterList,
@@ -59,7 +59,7 @@ async def list_rls_filters(
 ) -> RlsFilterList | RlsFilterError:
     """List row level security filters. Requires admin access.
 
-    Returns RLS filter metadata including name, filter type, tables, roles, and clause.
+    Returns RLS filter metadata including name, description, filter type, tables, roles, clause, created_on, and changed_on.
 
     Sortable columns for order_column: id, name, filter_type, changed_on
     """
@@ -83,7 +83,7 @@ async def list_rls_filters(
             dao_class=RLSDAO,
             output_schema=RlsFilterInfo,
             item_serializer=_serialize_rls_filter,
-            filter_type=RlsColumnFilter,
+            filter_type=RlsFilter,
             default_columns=DEFAULT_RLS_COLUMNS,
             search_columns=["name"],
             list_field_name="rls_filters",

@@ -47,18 +47,20 @@ DEFAULT_RLS_COLUMNS = ["id", "name", "filter_type", "clause"]
 ALL_RLS_COLUMNS = [
     "id",
     "name",
+    "description",
     "filter_type",
     "tables",
     "roles",
     "clause",
     "group_key",
+    "created_on",
     "changed_on",
 ]
 
 SORTABLE_RLS_COLUMNS = ["id", "name", "filter_type", "changed_on"]
 
 
-class RlsColumnFilter(ColumnOperator):
+class RlsFilter(ColumnOperator):
     """Filter object for RLS filter listing."""
 
     col: Literal["name", "filter_type"] = Field(
@@ -86,6 +88,9 @@ class RlsRoleRef(BaseModel):
 class RlsFilterInfo(BaseModel):
     id: int | None = Field(None, description="RLS filter ID")
     name: str | None = Field(None, description="RLS filter name")
+    description: str | None = Field(
+        None, description="Human-readable description of the filter's purpose"
+    )
     filter_type: str | None = Field(None, description="Filter type: Regular or Base")
     tables: List[RlsTableRef] | None = Field(
         None, description="Tables this filter applies to"
@@ -97,6 +102,7 @@ class RlsFilterInfo(BaseModel):
     group_key: str | None = Field(
         None, description="Group key for Base filter grouping"
     )
+    created_on: str | datetime | None = Field(None, description="Creation timestamp")
     changed_on: str | datetime | None = Field(
         None, description="Last modification timestamp"
     )
@@ -130,7 +136,7 @@ class RlsFilterList(BaseModel):
     columns_loaded: List[str] = Field(default_factory=list)
     columns_available: List[str] = Field(default_factory=list)
     sortable_columns: List[str] = Field(default_factory=list)
-    filters_applied: List[RlsColumnFilter] = Field(default_factory=list)
+    filters_applied: List[RlsFilter] = Field(default_factory=list)
     pagination: PaginationInfo | None = None
     timestamp: datetime | None = None
     model_config = ConfigDict(ser_json_timedelta="iso8601")
@@ -140,7 +146,7 @@ class ListRlsFiltersRequest(BaseModel):
     """Request schema for list_rls_filters."""
 
     filters: Annotated[
-        List[RlsColumnFilter],
+        List[RlsFilter],
         Field(
             default_factory=list,
             description="List of filter objects (col, opr, value). "
@@ -184,8 +190,8 @@ class ListRlsFiltersRequest(BaseModel):
 
     @field_validator("filters", mode="before")
     @classmethod
-    def parse_filters(cls, v: Any) -> List[RlsColumnFilter]:
-        return parse_json_or_model_list(v, RlsColumnFilter, "filters")
+    def parse_filters(cls, v: Any) -> List[RlsFilter]:
+        return parse_json_or_model_list(v, RlsFilter, "filters")
 
     @field_validator("select_columns", mode="before")
     @classmethod
@@ -246,10 +252,12 @@ def serialize_rls_filter_object(rls_filter: Any) -> RlsFilterInfo | None:
     return RlsFilterInfo(
         id=getattr(rls_filter, "id", None),
         name=getattr(rls_filter, "name", None),
+        description=getattr(rls_filter, "description", None),
         filter_type=getattr(rls_filter, "filter_type", None),
         tables=tables,
         roles=roles,
         clause=getattr(rls_filter, "clause", None),
         group_key=getattr(rls_filter, "group_key", None),
+        created_on=getattr(rls_filter, "created_on", None),
         changed_on=getattr(rls_filter, "changed_on", None),
     )

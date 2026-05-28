@@ -23,7 +23,7 @@ from fastmcp import Client
 from pydantic import ValidationError
 
 from superset.mcp_service.app import mcp
-from superset.mcp_service.rls.schemas import ListRlsFiltersRequest, RlsColumnFilter
+from superset.mcp_service.rls.schemas import ListRlsFiltersRequest, RlsFilter
 from superset.utils import json
 
 logging.basicConfig(level=logging.DEBUG)
@@ -40,9 +40,11 @@ def create_mock_rls_filter(
     rls_filter = MagicMock()
     rls_filter.id = filter_id
     rls_filter.name = name
+    rls_filter.description = None
     rls_filter.filter_type = filter_type
     rls_filter.clause = clause
     rls_filter.group_key = group_key
+    rls_filter.created_on = None
     rls_filter.changed_on = None
 
     table = MagicMock()
@@ -73,17 +75,17 @@ def mock_auth():
         yield mock_get_user
 
 
-class TestRlsColumnFilterSchema:
+class TestRlsFilterSchema:
     def test_invalid_filter_column_rejected(self):
         with pytest.raises(ValidationError):
-            RlsColumnFilter(col="clause", opr="eq", value="test")
+            RlsFilter(col="clause", opr="eq", value="test")
 
     def test_valid_name_filter(self):
-        f = RlsColumnFilter(col="name", opr="eq", value="test")
+        f = RlsFilter(col="name", opr="eq", value="test")
         assert f.col == "name"
 
     def test_valid_filter_type_filter(self):
-        f = RlsColumnFilter(col="filter_type", opr="eq", value="Regular")
+        f = RlsFilter(col="filter_type", opr="eq", value="Regular")
         assert f.col == "filter_type"
 
 
