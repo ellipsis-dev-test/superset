@@ -324,6 +324,40 @@ class GetDatasetInfoRequest(MetadataCacheControl):
     ]
 
 
+class CreateDatasetRequest(BaseModel):
+    """Request schema for create_dataset to register a physical table as a dataset."""
+
+    database_id: Annotated[
+        int,
+        Field(
+            description="ID of the database connection to register the table against"
+        ),
+    ]
+    schema: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Schema (namespace) where the table lives, e.g. 'public'. "
+            "Omit or pass None for databases without schema namespaces (e.g. SQLite).",
+        ),
+    ]
+    table_name: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Name of the physical table to register as a dataset",
+        ),
+    ]
+    owners: Annotated[
+        List[int] | None,
+        Field(
+            default=None,
+            description="Optional list of owner user IDs. "
+            "Defaults to the calling user.",
+        ),
+    ]
+
+
 class CreateVirtualDatasetRequest(BaseModel):
     """Request schema for create_virtual_dataset."""
 
