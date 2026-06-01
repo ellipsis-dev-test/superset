@@ -2866,6 +2866,7 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         catalog: Optional[str] = None,
         schema: Optional[str] = None,
         template_params: Optional[dict[str, Any]] = None,
+        force_dataset_match: bool = False,
     ) -> None:
         """
         Raise an exception if the user cannot access the resource.
@@ -2880,6 +2881,15 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         :param catalog: Optional catalog name
         :param schema: Optional schema name
         :param template_params: Optional template parameters for Jinja templating
+        :param force_dataset_match: When True, the historical
+            ``catalog_access`` / ``schema_access`` fallthroughs in the
+            database+table / query branch are bypassed and every referenced
+            table must resolve to a registered Superset dataset the user
+            has ``datasource_access`` on (or owns). Call sites that execute
+            or return raw row data (SQL Lab, MetaDB) set this to True.
+            The default (False) preserves the historical semantics for
+            chart-data, dataset CRUD, ``/table_metadata/``, and
+            ``/select_star/``.
         :raises SupersetSecurityException: If the user cannot access the resource
         """
         # pylint: disable=import-outside-toplevel
@@ -2928,35 +2938,82 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
                     cast(Query, query),
                     template_params,
                 )
+                parse_result = process_jinja_sql(query.sql, database, template_params)
+                # Under strict scoping, refuse any statement the parser
+                # could not fully model (sqlglot exp.Command). Such
+                # statements may reference tables via dynamic SQL or
+                # vendor syntax that extract_tables_from_statement cannot
+                # see, so the dataset-match check below would be blind to
+                # them. Fail closed.
+                if (
+                    force_dataset_match
+                    and parse_result.script.has_unparseable_statement
+                ):
+                    raise SupersetSecurityException(
+                        SupersetError(
+                            error_type=SupersetErrorType.QUERY_SECURITY_ACCESS_ERROR,
+                            message=_(
+                                "SQL Lab cannot authorise a statement that "
+                                "could not be fully parsed. Qualify tables "
+                                "explicitly and avoid dynamic SQL inside "
+                                "stored-procedure or vendor-specific calls."
+                            ),
+                            level=ErrorLevel.ERROR,
+                        )
+                    )
                 tables = {
                     table_.qualify(
                         catalog=query.catalog or default_catalog,
                         schema=default_schema,
                     )
-                    for table_ in process_jinja_sql(
-                        query.sql, database, template_params
-                    ).tables
+                    for table_ in parse_result.tables
                 }
             elif table:
-                # Make sure table has the default catalog, if not specified.
-                tables = {table.qualify(catalog=default_catalog)}
+                # Make sure table has the default catalog, and (when an
+                # under-qualified Table was passed) the database's default
+                # schema. Callers like MetaDB legitimately pass 2-part URIs
+                # ``db.table`` that mean "the database's default schema";
+                # resolving them against the engine spec lets those still
+                # match a registered dataset. If the engine cannot supply a
+                # default the strict-deny rule below fires and we fail closed.
+                table_catalog = table.catalog or default_catalog
+                schema_default = (
+                    None if table.schema else database.get_default_schema(table_catalog)
+                )
+                tables = {table.qualify(catalog=table_catalog, schema=schema_default)}
 
             denied = set()
 
+            # When the caller asks for strict scoping (SQL Lab raw queries,
+            # MetaDB) the historical catalog_access/schema_access fallthroughs
+            # are skipped and every referenced table must resolve to a
+            # registered Superset dataset the user can access. Other callers
+            # keep the existing semantics.
             for table_ in tables:
-                catalog_perm = self.get_catalog_perm(
-                    database.database_name,
-                    table_.catalog,
-                )
-                if catalog_perm and self.can_access("catalog_access", catalog_perm):
-                    continue
+                if not force_dataset_match:
+                    catalog_perm = self.get_catalog_perm(
+                        database.database_name,
+                        table_.catalog,
+                    )
+                    if catalog_perm and self.can_access("catalog_access", catalog_perm):
+                        continue
 
-                schema_perm = self.get_schema_perm(
-                    database.database_name,
-                    table_.catalog,
-                    table_.schema,
-                )
-                if schema_perm and self.can_access("schema_access", schema_perm):
+                    schema_perm = self.get_schema_perm(
+                        database.database_name,
+                        table_.catalog,
+                        table_.schema,
+                    )
+                    if schema_perm and self.can_access("schema_access", schema_perm):
+                        continue
+
+                # Under strict scoping, refuse tables whose schema we could
+                # not pin down. query_datasources_by_name drops the schema
+                # filter when schema is None and would otherwise return
+                # SqlaTables in any schema, which the database engine may
+                # then resolve to a different schema via search_path. The
+                # dataset-match check would be against the wrong row.
+                if force_dataset_match and not table_.schema:
+                    denied.add(table_)
                     continue
 
                 datasources = SqlaTable.query_datasources_by_name(
